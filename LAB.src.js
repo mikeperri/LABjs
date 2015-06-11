@@ -92,7 +92,14 @@
 	}
 
 	// creates a script load listener
-	function create_script_load_listener(elem,registry_item,flag,onload) {
+	function create_script_load_listener(elem,registry_item,flag,onload,optional) {
+		if (optional){
+			elem.addEventListener('error', function(){
+				if (registry_item[flag]) return;
+				onload();
+			});
+		}
+
 		elem.onload = elem.onreadystatechange = function() {
 			if ((elem.readyState && elem.readyState != "complete" && elem.readyState != "loaded") || registry_item[flag]) return;
 			elem.onload = elem.onreadystatechange = null;
@@ -169,7 +176,7 @@
 					create_script_load_listener(script,registry_item,"ready",function() {
 						append_to.removeChild(script);
 						onload();
-					});
+					},script_obj.optional);
 					script.src = src;
 					append_to.insertBefore(script,append_to.firstChild);
 				}
@@ -178,14 +185,14 @@
 			else if (script_ordered_async) {
 				/*!START_DEBUG*/if (chain_opts[_Debug]) log_msg("start script load (ordered async): "+src);/*!END_DEBUG*/
 				script.async = false;
-				create_script_load_listener(script,registry_item,"finished",onload);
+				create_script_load_listener(script,registry_item,"finished",onload,script_obj.optional);
 				script.src = src;
 				append_to.insertBefore(script,append_to.firstChild);
 			}
 			// otherwise, just a normal script element
 			else {
 				/*!START_DEBUG*/if (chain_opts[_Debug]) log_msg("start script load: "+src);/*!END_DEBUG*/
-				create_script_load_listener(script,registry_item,"finished",onload);
+				create_script_load_listener(script,registry_item,"finished",onload,script_obj.optional);
 				script.src = src;
 				append_to.insertBefore(script,append_to.firstChild);
 			}
@@ -226,7 +233,7 @@
 			script = registry_item.elem || document.createElement("script");
 			if (script_obj.type) script.type = script_obj.type;
 			if (script_obj.charset) script.charset = script_obj.charset;
-			create_script_load_listener(script,registry_item,"finished",preload_execute_finished);
+			create_script_load_listener(script,registry_item,"finished",preload_execute_finished,script_obj.optional);
 			
 			// script elem was real-preloaded
 			if (registry_item.elem) {
@@ -365,49 +372,58 @@
 				}
 			}
 
+			function chained_api_script_fn(args, optional){
+				for (var i=0; i<args.length; i++) {
+					(function(script_obj,script_list){
+						var splice_args;
+
+						if (!is_array(script_obj)) {
+							script_list = [script_obj];
+						}
+						for (var j=0; j<script_list.length; j++) {
+							init_script_chain_group();
+							script_obj = script_list[j];
+
+							if (is_func(script_obj)) script_obj = script_obj();
+							if (!script_obj) continue;
+							if (is_array(script_obj)) {
+								// set up an array of arguments to pass to splice()
+								splice_args = [].slice.call(script_obj); // first include the actual array elements we want to splice in
+								splice_args.unshift(j,1); // next, put the `index` and `howMany` parameters onto the beginning of the splice-arguments array
+								[].splice.apply(script_list,splice_args); // use the splice-arguments array as arguments for splice()
+								j--; // adjust `j` to account for the loop's subsequent `j++`, so that the next loop iteration uses the same `j` index value
+								continue;
+							}
+							if (typeof script_obj == "string") script_obj = {src:script_obj};
+							script_obj = merge_objs(script_obj,{
+								ready:false,
+								ready_cb:chain_script_ready,
+								finished:false,
+								finished_cb:chain_script_executed,
+								optional:optional
+							});
+							group.finished = false;
+							group.scripts.push(script_obj);
+
+							do_script(chain_opts,script_obj,group,(can_use_preloading && scripts_currently_loading));
+							scripts_currently_loading = true;
+
+							if (chain_opts[_AlwaysPreserveOrder]) chainedAPI.wait();
+						}
+					})(args[i],args[i]);
+				}
+				return chainedAPI;
+			}
+
 			// API for $LAB chains
 			chainedAPI = {
 				// start loading one or more scripts
 				script:function(){
-					for (var i=0; i<arguments.length; i++) {
-						(function(script_obj,script_list){
-							var splice_args;
-							
-							if (!is_array(script_obj)) {
-								script_list = [script_obj];
-							}
-							for (var j=0; j<script_list.length; j++) {
-								init_script_chain_group();
-								script_obj = script_list[j];
-								
-								if (is_func(script_obj)) script_obj = script_obj();
-								if (!script_obj) continue;
-								if (is_array(script_obj)) {
-									// set up an array of arguments to pass to splice()
-									splice_args = [].slice.call(script_obj); // first include the actual array elements we want to splice in
-									splice_args.unshift(j,1); // next, put the `index` and `howMany` parameters onto the beginning of the splice-arguments array
-									[].splice.apply(script_list,splice_args); // use the splice-arguments array as arguments for splice()
-									j--; // adjust `j` to account for the loop's subsequent `j++`, so that the next loop iteration uses the same `j` index value
-									continue;
-								}
-								if (typeof script_obj == "string") script_obj = {src:script_obj};
-								script_obj = merge_objs(script_obj,{
-									ready:false,
-									ready_cb:chain_script_ready,
-									finished:false,
-									finished_cb:chain_script_executed
-								});
-								group.finished = false;
-								group.scripts.push(script_obj);
-								
-								do_script(chain_opts,script_obj,group,(can_use_preloading && scripts_currently_loading));
-								scripts_currently_loading = true;
-								
-								if (chain_opts[_AlwaysPreserveOrder]) chainedAPI.wait();
-							}
-						})(arguments[i],arguments[i]);
-					}
-					return chainedAPI;
+					return chained_api_script_fn(arguments, false);
+				},
+				// same as script function, but if a script fails to load, the chain will continue anyway
+				optionalScript:function(){
+					return chained_api_script_fn(arguments, true);
 				},
 				// force LABjs to pause in execution at this point in the chain, until the execution thus far finishes, before proceeding
 				wait:function(){
@@ -428,6 +444,7 @@
 			// the first chain link API (includes `setOptions` only this first time)
 			return {
 				script:chainedAPI.script, 
+				optionalScript:chainedAPI.optionalScript,
 				wait:chainedAPI.wait, 
 				setOptions:function(opts){
 					merge_objs(opts,chain_opts);
@@ -448,6 +465,9 @@
 			},
 			script:function(){
 				return create_chain().script.apply(null,arguments);
+			},
+			optionalScript:function(){
+				return create_chain().optionalScript.apply(null,arguments);
 			},
 			wait:function(){
 				return create_chain().wait.apply(null,arguments);
